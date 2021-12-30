@@ -1,0 +1,6 @@
+Check drupal log. 
+
+// Logs a notice
+\Drupal::logger('my_module')->notice($message);
+// Logs an error
+\Drupal::logger('my_module')->error($message);

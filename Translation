@@ -1,0 +1,1 @@
+drush locale-check && drush locale-update && drush cr

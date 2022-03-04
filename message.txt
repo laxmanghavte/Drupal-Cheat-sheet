@@ -1,0 +1,1 @@
+\Drupal::messenger()->addMessage(t('Course has been deleted.'), 'status');

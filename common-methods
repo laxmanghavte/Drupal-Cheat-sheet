@@ -1,0 +1,9 @@
+/**
+ * Implements hook_config_readonly_whitelist_patterns().
+ */
+function module_config_readonly_whitelist_patterns() {
+  return [
+    'module_menu_links.settings',
+    'module_utilities.settings',
+  ];
+}

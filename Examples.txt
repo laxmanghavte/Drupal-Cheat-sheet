@@ -1,0 +1,1 @@
+Custom Entity: https://github.com/pfizer/pfprograsecombr_profile/tree/1.x/modules/pfe_upjohn_access/src/Entity

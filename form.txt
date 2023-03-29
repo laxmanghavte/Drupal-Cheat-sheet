@@ -1,0 +1,1567 @@
+<?php
+
+namespace Drupal\module\Form;
+
+use Drupal\Core\Form\FormBase;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\module\OrderData;
+use Symfony\Component\DependencyInjection\ContainerInterface;
+use Drupal\Core\Ajax\AjaxResponse;
+use Drupal\Core\Ajax\HtmlCommand;
+use Drupal\Core\Ajax\InvokeCommand;
+use Drupal\Core\Ajax\RedirectCommand;
+use Drupal\Core\Ajax\ReplaceCommand;
+use Drupal\Core\Render\Markup;
+use Drupal\Component\Datetime\TimeInterface;
+use Drupal\Core\Config\ConfigFactoryInterface;
+
+/**
+ * Class OrderForm.
+ */
+class OrderForm extends FormBase {
+
+  /**
+   * sm order details.
+   *
+   * @var \Drupal\module\OrderData
+   */
+  protected $orderData;
+
+  /**
+   * The datetime.time service.
+   *
+   * @var \Drupal\Component\Datetime\TimeInterface
+   */
+  protected $timeService;
+
+  /**
+   * The config factory.
+   *
+   * @var \Drupal\Core\Config\ConfigFactoryInterface
+   */
+  protected $configFactory;
+
+  /**
+   * OrderForm constructor.
+   *
+   * @param \Drupal\module\OrderData $orderData
+   *   $orderData Object.
+   * @param \Drupal\Component\Datetime\TimeInterface $time_service
+   *   The datetime.time service.
+   * @param \Drupal\Core\Config\ConfigFactoryInterface $config_factory
+   *   The configuration factory.
+   */
+  public function __construct(OrderData $orderData, TimeInterface $time_service, ConfigFactoryInterface $config_factory) {
+    $this->timeService = $time_service;
+    $this->orderData = $orderData;
+    $this->configFactory = $config_factory->get('module.settings');
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public static function create(ContainerInterface $container) {
+    return new static(
+      $container->get('module.order_data'),
+      $container->get('datetime.time'),
+      $container->get('config.factory')
+    );
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getFormId() {
+    return 'order_form';
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function buildForm(array $form, FormStateInterface $form_state) {
+    $session = $this->getRequest()->getSession();
+    $rows = $session->get('rows');
+    if (is_null($rows)) {
+      $rows = [];
+      $session->set('rows', $rows);
+    }
+    $email = $this->orderData->userMail();
+    $form['#prefix'] = '<div id="main-wrapper-order">';
+    $form['#suffix'] = '</div>';
+    $form['form_header'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'h2',
+      '#value' => $this->t('Request specialty.'),
+    ];
+
+    $form['title'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'h2',
+      '#value' => $this->t('Free sm Request'),
+    ];
+
+    $form['product_help_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => t("Select below"),
+    ];
+
+    $options = [
+      'NA' => $this->t('Product Name'),
+    ];
+    if ($selected_product = $form_state->getValue('product_select')) {
+      $default_val = $selected_product;
+    }
+    else {
+      $default_val = $this->t('Product Name');
+    }
+    $product_dose = $this->orderData->getAllProductDosage();
+    $products = [];
+    if (!empty($rows)) {
+      foreach ($rows as $id => $row) {
+        unset($product_dose[$row['product']][$row['dose']]);
+      }
+    }
+    foreach ($product_dose as $key => $prod) {
+      if (count($prod) > 0) {
+        $products[$key] = $key;
+      }
+    }
+    $commercial_email = $this->orderData->userCommericialEmail();
+    $form = $this->productSlection($form, $form_state);
+    if (count($rows) <= 4) {
+      $form['products']['product_select'] = [
+        '#type' => 'select',
+        '#validated' => TRUE,
+        '#title' => $this->t('Choose the value'),
+        '#default_value' => 'NA',
+        '#options' => array_merge($options, $products),
+        '#attributes' => [
+          'class' => ['select-product'],
+        ],
+        '#ajax' => [
+          'callback' => '::loadDose',
+          'disable-refocus' => FALSE,
+          'event' => 'change',
+          'wrapper' => 'main-wrapper-order',
+          'progress' => [
+            'type' => 'throbber',
+            'message' => $this->t('Loading...'),
+          ],
+        ],
+      ];
+      $selected_product = $form_state->getValue('product_select');
+      $dose_options = [
+        'NA' => $this->t('Choose the dosage'),
+      ];
+      if (!empty($selected_product) && $selected_product !== "NA") {
+        $dose_list = $product_dose[$selected_product];
+        if (isset($dose_list)) {
+          ksort($dose_list);
+          $dose_options = array_merge($dose_options, $dose_list);
+        }
+      }
+      $form['products']['dose'] = [
+        '#type' => 'select',
+        '#validated' => TRUE,
+        '#title' => $this->t('Choose the dosage'),
+        '#options' => $dose_options,
+        '#default_value' => 'NA',
+        '#prefix' => '<div id="dose-wrapper">',
+        '#suffix' => '</div>',
+        '#attributes' => [
+          'class' => ['select-dose'],
+        ],
+        '#ajax' => [
+          'callback' => '::loadQuantity',
+          'disable-refocus' => FALSE,
+          'event' => 'change',
+          'wrapper' => 'main-wrapper-order',
+          'progress' => [
+            'type' => 'throbber',
+            'message' => $this->t('Loading...'),
+          ],
+        ],
+      ];
+
+      $selected_product = $form_state->getValue('product_select');
+      $selected_dose = $form_state->getValue('dose');
+      $quanity = 0;
+      if (!empty($selected_product) && $selected_product !== 'NA' && !empty($selected_dose) && $selected_dose !== 'NA') {
+        $physician_details = $this->orderData->loadPhysicianDetails($selected_product);
+
+        $quanity = $physician_details['quanity'];
+        if ($physician_details['field_ordered'] == 'N' && $physician_details['field_allowed'] == 'Y') {
+          if ($quanity == 1) {
+            $value = $this->t("message 1.");
+          }
+          else {
+            $value = $this->t('message 2 @quanity', ['@quantity' => $quanity]);
+          }
+          $value = Markup::create($value);
+          $class = 'default-quantity-allowed';
+        }
+        else {
+          $quantity_error = $this->configFactory->get('quantity_error');
+          if (empty($quantity_error)) {
+            $value_text = $this->t('msg');
+            $value = Markup::create($value_text);
+          }
+          else {
+            $value = $quantity_error;
+          }
+          $class = 'default-quantity-rejected';
+        }
+      }
+      else {
+        $default_message = $this->configFactory->get('default_message');
+        if (empty($default_message)) {
+          $value_text = $this->t('msg');
+          $value = Markup::create($value_text);
+        }
+        else {
+          $value = $default_message;
+        }
+        $class = 'default-quantity-help';
+      }
+
+      $selected_product = $form_state->getValue('product_select');
+      $selected_dose = $form_state->getValue('dose');
+      if (!empty($rows)) {
+        $physician_details = $this->orderData->loadPhysicianDetails($rows[0]['product']);
+      }
+      $form['products']['quantity'] = [
+        '#type' => 'html_tag',
+        '#tag' => 'p',
+        '#value' => $value,
+        '#attributes' => [
+          'class' => $class,
+        ],
+        '#prefix' => '<div id="quantity-wrapper">',
+        '#suffix' => '</div>',
+      ];
+
+      $form['products']['dose_quantity'] = [
+        '#type' => 'hidden',
+        '#value' => $quanity,
+      ];
+
+      $form['products']['nid'] = [
+        '#type' => 'hidden',
+        '#value' => $physician_details['nid'],
+      ];
+
+      $form['products']['step_one_add_more'] = [
+        '#type' => 'button',
+        '#value' => $this->t('+ Add one more product'),
+        '#name' => 'step_one_add_more' ,
+        '#attributes' => [
+          'class' => ['step_one_add_more active'],
+        ],
+        '#ajax' => [
+          'callback' => '::addmoreCallback',
+          'disable-refocus' => FALSE,
+          'event' => 'click',
+          'wrapper' => 'main-wrapper-order',
+          'progress' => [
+            'type' => 'throbber',
+            'message' => $this->t('Loading...'),
+          ],
+        ],
+      ];
+    }
+    if (empty($products)) {
+      unset($form['products']['product_select']);
+      unset($form['products']['dose']);
+      unset($form['products']['quantity']);
+      unset($form['products']['step_one_add_more']);
+    }
+    $terms_text = $this->t('tc');
+    $terms = Markup::create($terms_text);
+    $form['terms'] = [
+      '#type' => 'checkbox',
+      '#attributes' => [
+        'class' => ['terms'],
+      ],
+      '#title' => $terms,
+    ];
+
+    $form['required_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('<span>*</span> Required field'),
+    ];
+
+    $form['step_one_next'] = [
+      '#type' => 'button',
+      '#value' => $this->t('Next'),
+      '#name' => 'step_one_next',
+      '#attributes' => [
+        'disabled' => 'disabled',
+        'class' => ['step_one_next'],
+      ],
+      '#ajax' => [
+        'callback' => '::loadPhysicianDetails',
+        'disable-refocus' => FALSE,
+        'event' => 'click',
+        'wrapper' => 'step-two',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Loading...'),
+        ],
+      ],
+    ];
+
+    $form['step_one_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('msg', ['@sl' => $commercial_email]),
+      '#attributes' => [
+        'class' => 'step-one-text',
+      ],
+    ];
+
+    $form['step_two']['title'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'h2',
+      '#value' => $this->t('Data Confirmation'),
+    ];
+
+    $form['step_two']['help_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Check that the data below is correct.'),
+      '#attributes' => [
+        'class' => ['help_text'],
+      ],
+    ];
+
+    $form['step_two']['name'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Name'),
+      '#attributes' => [
+        'class' => ['field-label'],
+      ],
+    ];
+
+    $form['step_two']['name_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details', 'name_data', 'has-input'],
+      ],
+    ];
+
+    $form['step_two']['first_name'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('First Name'),
+      '#pattern' => '/^[A-Za-z]+$/',
+      '#value' => isset($physician_details) ? $physician_details['field_first_name'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field-first-name'],
+      ],
+      '#suffix' => '<div id="first-name-error-message"></div>',
+    ];
+
+    $form['step_two']['last_name'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('Last Name'),
+      '#pattern' => '/^[A-Za-z]+$/',
+      '#value' => isset($physician_details) ? $physician_details['field_last_name'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field-last-name'],
+      ],
+      '#suffix' => '<div id="last-name-error-message"></div>',
+    ];
+
+    $form['step_two']['valid_zipcode'] = [
+      '#type' => 'hidden',
+      '#value' => 1,
+      '#attributes' => [
+        'class' => ['valid-zipcode'],
+      ],
+    ];
+
+    $form['tc_time'] = [
+      '#type' => 'hidden',
+      '#value' => 0,
+      '#attributes' => [
+        'class' => ['tc_datetime'],
+      ],
+    ];
+
+    $form['pc_time'] = [
+      '#type' => 'hidden',
+      '#value' => 0,
+      '#attributes' => [
+        'class' => ['pc_datetime'],
+      ],
+    ];
+
+    $form['step_two']['check_phone'] = [
+      '#type' => 'hidden',
+      '#value' => 0,
+      '#attributes' => [
+        'class' => ['check-phone'],
+      ],
+    ];
+
+    $form['step_two']['cpf_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $physician_details['field_cpf_data'] ?? '',
+      '#attributes' => [
+        'class' => ['field-label', 'cpf-data', 'has-input'],
+      ],
+    ];
+
+    $form['step_two']['cpf'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => 'XXX.XXX.XXX-XX',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-label', 'cpf-data'],
+      ],
+      '#suffix' => '<div id="cpf-error-message"></div>',
+    ];
+
+    $form['step_two']['crm'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('CRM'),
+      '#attributes' => [
+        'class' => ['field-label'],
+      ],
+    ];
+
+    $form['step_two']['crm_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details'],
+      ],
+    ];
+
+    $form['step_two']['zipcode_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details', 'zipcode_data'],
+      ],
+    ];
+
+    $form['step_two']['zipcode'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => 'XXXXX-XXX',
+      '#value' => isset($physician_details) ? $physician_details['zipcode'] : '',
+      '#maxlength' => 10,
+      '#attributes' => [
+        'class' => ['df-hidden', 'zipcode'],
+      ],
+      '#attached' => [
+        'library' => ['module/name_zipcode_length'],
+      ],
+      '#ajax' => [
+        'callback' => [$this, 'ajaxConsultZip'],
+        'event' => 'overminlength',
+        'wrapper' => 'address-wrapper',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Verifying entry...'),
+        ],
+      ],
+      '#suffix' => '<div id="zipcode-error-message"></div>',
+    ];
+
+    if (isset($physician_details) && !is_null($physician_details)) {
+      $form['step_two']['crm_data']['#value'] = !empty($physician_details['crm']) ? $physician_details['crm'] : '-';
+      $form['step_two']['zipcode_data']['#value'] = !empty($physician_details['zipcode']) ? $physician_details['zipcode'] : '-';
+      $form['step_two']['cpf']['#value'] = !empty($physician_details['cpf']) ? $physician_details['cpf'] : '-';
+    }
+
+    $form['step_two']['address'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Business address'),
+      '#attributes' => [
+        'class' => ['field-label'],
+      ],
+    ];
+
+    $form['step_two']['address_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details', 'address_data', 'has-input'],
+      ],
+    ];
+
+    $form['step_two']['address_wrapper'] = [
+      '#type' => 'container',
+      '#attributes' => [
+        'class' => ['address-wrapper'],
+      ],
+    ];
+
+    $form['step_two']['address_wrapper']['address_1'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('Address 1'),
+      '#value' => isset($physician_details) ? $physician_details['field_address_1'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_address_1'],
+      ],
+      '#suffix' => '<div id="field-address-one-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['address_2'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('Number'),
+      '#value' => isset($physician_details) ? $physician_details['field_address_2'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_address_2'],
+      ],
+      '#suffix' => '<div id="field-address-two-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['complement'] = [
+      '#type' => 'textfield',
+      '#placeholder' => $this->t('Complement'),
+      '#value' => isset($physician_details) ? $physician_details['field_complement'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_complement', 'complement_top'],
+      ],
+      '#suffix' => '<div id="field-address-complement-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['address_3'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('Neighborhood'),
+      '#value' => isset($physician_details) ? $physician_details['field_address_3'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_address_3'],
+      ],
+      '#suffix' => '<div id="field-address-three-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['city_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('City'),
+      '#attributes' => [
+        'class' => ['field-city'],
+      ],
+    ];
+
+    $form['step_two']['address_wrapper']['city_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => !empty($physician_details['field_city']) ? $physician_details['field_city'] : '-',
+      '#attributes' => [
+        'class' => ['field-details', 'city_data', 'has-input'],
+      ],
+    ];
+
+    $form['step_two']['address_wrapper']['city'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('City'),
+      '#value' => isset($physician_details) ? $physician_details['field_city'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_city'],
+      ],
+      '#suffix' => '<div id="field-city-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['state_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('State'),
+      '#attributes' => [
+        'class' => ['field-state'],
+      ],
+    ];
+
+    $form['step_two']['address_wrapper']['state'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => $this->t('State'),
+      '#value' => isset($physician_details) ? $physician_details['field_state'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_state'],
+      ],
+      '#suffix' => '<div id="field-state-error-message"></div>',
+    ];
+
+    $form['step_two']['address_wrapper']['state_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => !empty($physician_details['field_state']) ? $physician_details['field_state'] : '-',
+      '#attributes' => [
+        'class' => ['field-details', 'state_data', 'has-input'],
+      ],
+    ];
+
+    if (isset($physician_details) && isset($physician_details) && !is_null($physician_details)) {
+      $form['step_two']['address_data']['#value'] = $physician_details['field_address_1'] . ' ' . $physician_details['field_address_2'] . ' ' . $physician_details['field_complement'] . ' ' . $physician_details['field_address_3'];
+      $form['step_two']['name_data']['#value'] = $physician_details['field_first_name'] . ' ' . $physician_details['field_last_name'];
+      $form['step_two']['city_data']['#value'] = !empty($physician_details['field_city']) ? $physician_details['field_city'] : '-';
+      $form['step_two']['state_data']['#value'] = !empty($physician_details['field_state']) ? $physician_details['field_city'] : '-';
+    }
+
+    $form['step_two']['mail'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Email address'),
+      '#attributes' => [
+        'class' => ['field-label'],
+      ],
+    ];
+
+    $form['step_two']['mail_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details'],
+      ],
+    ];
+
+    if (isset($physician_details) && !is_null($physician_details)) {
+      $form['step_two']['mail_data']['#value'] = $physician_details['mail'];
+    }
+
+    $form['step_two']['phoneland'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Mobile Phone'),
+      '#attributes' => [
+        'class' => ['field-label', 'step-two'],
+      ],
+    ];
+
+    $form['step_two']['phoneland_data_1'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => '(XX) XXXX-XXXX',
+      '#value' => isset($physician_details) ? $physician_details['phoneland'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'phoneland_data_1'],
+      ],
+      '#suffix' => '<div id="phone-land-error-message"></div>',
+    ];
+
+    $form['step_two']['phoneland_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details' , 'phoneland_data'],
+      ],
+    ];
+
+    $form['step_two']['phone'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Mobile Phone'),
+      '#attributes' => [
+        'class' => ['field-label'],
+      ],
+    ];
+
+    $form['step_two']['phone_data_1'] = [
+      '#type' => 'textfield',
+      '#required' => TRUE,
+      '#placeholder' => '(XX) XXXXX-XXXX',
+      '#value' => isset($physician_details) ? $physician_details['phone'] : '',
+      '#attributes' => [
+        'class' => ['df-hidden', 'field_phone_data_1'],
+      ],
+      '#suffix' => '<div id="phone-error-message"></div>',
+    ];
+
+    $form['step_two']['phone_data'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => '',
+      '#attributes' => [
+        'class' => ['field-details' , 'phone_data'],
+      ],
+    ];
+
+    $form['step_two']['edit'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Edit Data'),
+      '#attributes' => [
+        'id' => 'step-two-edit',
+        'class' => ['field-label'],
+      ],
+    ];
+
+    if (isset($physician_details) && !is_null($physician_details)) {
+      $form['step_two']['phone_data']['#value'] = !empty($physician_details['phone']) ? $physician_details['phone'] : '-';
+      $form['step_two']['phoneland_data']['#value'] = !empty($physician_details['phoneland']) ? $physician_details['phoneland'] : '-';
+    }
+
+    $terms_text = $this->t('I declare that the address indicated by me in the "Business Address" field where the free value sms will be delivered and received and the address of the laboratory, hospital or medical and dental office where I perform my professional activities, as required in article 3 of the Resolution ANVISA RDC No. 60/2009 VI-Art. 3rd.');
+    $terms = Markup::create($terms_text);
+    $form['step_two']['terms_setup2'] = [
+      '#type' => 'checkbox',
+      '#attributes' => [
+        'class' => ['terms_setup2'],
+      ],
+      '#title' => $terms,
+    ];
+
+    $form['step_two']['step_two_back'] = [
+      '#type' => 'button',
+      '#value' => $this->t('Back'),
+      '#name' => 'step_two_back',
+      '#ajax' => [
+        'callback' => '::loadStepOne',
+        'disable-refocus' => FALSE,
+        'event' => 'click',
+        'wrapper' => 'order-form-wrapper',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Loading...'),
+        ],
+      ],
+    ];
+
+    $form['step_two']['step_two_next'] = [
+      '#type' => 'button',
+      '#value' => $this->t('Next'),
+      '#name' => 'step_two_next',
+      '#attributes' => [
+        'disabled' => 'disabled',
+        'class' => ['step_two_next'],
+      ],
+      '#ajax' => [
+        'callback' => '::loadAll',
+        'disable-refocus' => FALSE,
+        'event' => 'click',
+        'wrapper' => 'order-form-wrapper',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Loading...'),
+        ],
+      ],
+    ];
+
+    $form['step_three']['title'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'h2',
+      '#value' => $this->t('Request Summary'),
+    ];
+
+    $form['step_three']['help_text'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('Please review your request details below.'),
+      '#attributes' => [
+        'class' => 'help_text',
+      ],
+    ];
+
+    $form['step_three']['sm_data_title'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('sm DATA'),
+      '#attributes' => [
+        'class' => 'head-title',
+      ],
+    ];
+
+    $form['step_three']['delivery_data_title'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $this->t('DELIVERY DATA'),
+      '#attributes' => [
+        'class' => 'head-title',
+      ],
+    ];
+
+    if (isset($physician_details) && !is_null($physician_details)) {
+      $form['step_three']['quantity_data']['#value'] = $physician_details['quanity'];
+    }
+
+    $form['step_three']['step_three_back'] = [
+      '#type' => 'button',
+      '#value' => $this->t('Back'),
+      '#name' => 'step_three_back',
+      '#ajax' => [
+        'callback' => '::loadStepTwo',
+        'disable-refocus' => FALSE,
+        'event' => 'click',
+        'wrapper' => 'order-form-wrapper',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Loading...'),
+        ],
+      ],
+    ];
+
+    $form['step_three']['step_three_request'] = [
+      '#type' => 'submit',
+      '#value' => $this->t('Request sms'),
+      '#name' => 'step_three_request',
+      '#ajax' => [
+        'callback' => '::requestsm',
+        'disable-refocus' => FALSE,
+        'event' => 'click',
+        'wrapper' => 'order-form-wrapper',
+        'progress' => [
+          'type' => 'throbber',
+          'message' => $this->t('Loading...'),
+        ],
+      ],
+    ];
+    if (isset($physician_details) && !is_null($physician_details)) {
+      $form['form_bottom'] = [
+        '#type' => 'html_tag',
+        '#tag' => 'p',
+        '#attributes' => [
+          'class' => ['step-two', 'step-three', 'hide-step'],
+        ],
+        '#value' => $this->t('If you need to change any of the information above, go back to the previous step to make the necessary changes to your registration data. If you have any questions, please contact <a href="mailto:amstragratis@name.com">amstragratis@name.com</a>.'),
+      ];
+    }
+
+    $form['#cache'] = ['max-age' => 0];
+
+    honeypot_add_form_protection($form, $form_state, ['honeypot']);
+
+    return $form;
+  }
+
+  /**
+   * Callback for both ajax-enabled buttons.
+   *
+   * Selects and returns the fieldset with the names in it.
+   */
+  public function addmoreCallback(array &$form, FormStateInterface $form_state) {
+    $options = [
+      'NA' => $this->t('Product Name'),
+    ];
+    $product_dose = $this->orderData->getAllProductDosage();
+    $products = [];
+    if (!empty($rows)) {
+      foreach ($rows as $id => $row) {
+        unset($product_dose[$row['product']][$row['dose']]);
+      }
+    }
+    foreach ($product_dose as $key => $prod) {
+      if (count($prod) > 0) {
+        $products[$key] = $key;
+      }
+    }
+
+    $form['products']['product_select']['#options'] = array_merge($options, $products);
+
+    $form['products']['product_select']['#value'] = $default_val;
+    $option = [
+      'NA' => $this->t('Choose the dosage'),
+    ];
+    $form['products']['dose']['#options'] = $option;
+    $form['products']['dose']['#value'] = 'NA';
+    $default_message = $this->configFactory->get('default_message');
+    if (empty($default_message)) {
+      $value_text = $this->t('<strong>Quantity:</strong> Once you have selected the value and dosage, we will show you the number of boxes that will be delivered to you.');
+      $value = Markup::create($value_text);
+    }
+    else {
+      $value = $default_message;
+    }
+    $class = 'default-quantity-help';
+
+    $form['products']['quantity'] = [
+      '#type' => 'html_tag',
+      '#tag' => 'p',
+      '#value' => $value,
+      '#attributes' => [
+        'class' => $class,
+      ],
+      '#prefix' => '<div id="quantity-wrapper">',
+      '#suffix' => '</div>',
+    ];
+    if (empty($products)) {
+      unset($form['products']);
+    }
+    $form = $this->productSlection($form, $form_state);
+    $form_state->setRebuild(TRUE);
+
+    return $form;
+  }
+
+  /**
+   * Update Selected product.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function productSlection(array &$form, FormStateInterface $form_state) {
+    $session = $this->getRequest()->getSession();
+    $rows = $session->get('rows');
+    if (is_null($rows)) {
+      $rows = [];
+      $session->set('rows', $rows);
+    }
+    if (!empty($rows)) {
+      foreach ($rows as $prod => $value) {
+        // Selected product.
+        $product = $value['product'];
+        $form['products']['selected_product'][$product . $dose] = [
+          '#type' => 'container',
+          '#attributes' => [
+            'class' => ['form-item selected_product_wrapper'],
+          ],
+        ];
+        $form['products']['selected_product'][$product . $dose]['label'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'label',
+          '#value' => $this->t('Choose the value'),
+        ];
+        $form['products']['selected_product'][$product . $dose]['select'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'div',
+          '#attributes' => [
+            'class' => ['select'],
+          ],
+        ];
+        $form['products']['selected_product'][$product . $dose]['select']['styledSelect'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'div',
+          '#attributes' => [
+            'class' => ['styledSelect'],
+          ],
+          '#value' => $product,
+        ];
+        // Selected Dose.
+        $dose = $value['dose'];
+        $form['products']['selected_product'][$dose] = [
+          '#type' => 'container',
+          '#attributes' => [
+            'class' => ['form-item'],
+          ],
+        ];
+        $form['products']['selected_product'][$dose]['label'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'label',
+          '#value' => $this->t('Choose the value'),
+        ];
+        $form['products']['selected_product'][$dose]['select'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'div',
+          '#attributes' => [
+            'class' => ['select'],
+          ],
+        ];
+        $form['products']['selected_product'][$dose]['select']['styledSelect'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'div',
+          '#attributes' => [
+            'class' => ['styledSelect'],
+          ],
+          '#value' => $dose,
+        ];
+        $quanity = $value['quanity'];
+        if ($quanity == 1) {
+          $message = $this->t("<strong>Quantity:</strong> You will receive 1 boxe(s) of medicine.");
+          $message = Markup::create($message);
+          $class = 'default-quantity-allowed';
+        }
+        elseif ($quanity == NULL || $quanity == '' || empty($quanity)) {
+          $quantity_error = $this->configFactory->get('quantity_error');
+          if (empty($quantity_error)) {
+            $message = $this->t('<strong>Quantity:</strong> You are not authorized to receive sms of this medicine.');
+          }
+          else {
+            $message = $quantity_error;
+          }
+          $message = Markup::create($message);
+          $class = 'default-quantity-rejected';
+        }
+        else {
+          $message = $this->t('<strong>Quantity:</strong> You will receive @quantity boxes of medicine.', ['@quantity' => $quanity]);
+          $message = Markup::create($message);
+          $class = 'default-quantity-allowed';
+        }
+
+        // Selected Quantity.
+        $form['products']['selected_product'][$dose . $quanity]['quantity'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $message,
+          '#attributes' => [
+            'class' => $class,
+          ],
+          '#prefix' => '<div id="quantity-wrapper">',
+          '#suffix' => '</div>',
+        ];
+        if ($quanity == NULL) {
+          continue;
+        }
+        // Medicine data.
+        $form['step_three']['data'][$product . $dose]['medicine'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $this->t('Medicine'),
+          '#attributes' => [
+            'class' => ['field-label'],
+          ],
+          '#prefix' => '<div class="sm-data-row"><div class="medicine-data">',
+        ];
+        $form['step_three']['data'][$product . $dose]['medicine_data'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $product,
+          '#attributes' => [
+            'class' => ['field-details', 'medicine-data-value'],
+          ],
+          '#suffix' => '</div>',
+        ];
+        $form['step_three']['data'][$product . $dose]['dosage'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $this->t('Dosage'),
+          '#attributes' => [
+            'class' => ['field-label'],
+          ],
+          '#prefix' => '<div class="dose-data">',
+        ];
+        $form['step_three']['data'][$product . $dose]['dosage_data'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $value['dose'],
+          '#attributes' => [
+            'class' => ['field-details', 'dose-details'],
+          ],
+          '#suffix' => '</div>',
+        ];
+
+        $form['step_three']['data'][$product . $dose]['quantity'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $this->t('Quantity'),
+          '#attributes' => [
+            'class' => ['field-label'],
+          ],
+          '#prefix' => '<div class="quanity-data">',
+        ];
+        $form['step_three']['data'][$product . $dose]['quantity_data'] = [
+          '#type' => 'html_tag',
+          '#tag' => 'p',
+          '#value' => $value['quanity'],
+          '#attributes' => [
+            'class' => ['field-details', 'quantity-data-value'],
+          ],
+          '#suffix' => '</div></div>',
+        ];
+      }
+    }
+
+    $options = [
+      'NA' => $this->t('Product Name'),
+    ];
+    $product_dose = $this->orderData->getAllProductDosage();
+    $products = [];
+    if (!empty($rows)) {
+      foreach ($rows as $id => $row) {
+        unset($product_dose[$row['product']][$row['dose']]);
+      }
+    }
+    foreach ($product_dose as $key => $prod) {
+      if (count($prod) > 0) {
+        $products[$key] = $key;
+      }
+    }
+    $form['products']['product_select']['#options'] = array_merge($options, $products);
+
+    if (empty($products)) {
+      unset($form['products']['product_select']);
+      unset($form['products']['dose']);
+    }
+    if (count($rows) >= 4) {
+      unset($form['products']['step_one_add_more']);
+      unset($form['products']['product_select']);
+      unset($form['products']['dose']);
+      unset($form['products']['quantity']);
+    }
+    else {
+      $form['products']['product_select']['#value'] = "NA";
+      $form['products']['dose']['#value'] = "NA";
+      if ($form['products']['quantity']['#attributes']['class'] != 'default-quantity-rejected') {
+        unset($form['products']['quantity']);
+      }
+    }
+
+    return $form;
+  }
+
+  /**
+   * Load available dose for selected product.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadDose(array &$form, FormStateInterface $form_state) {
+    if ($selected_product = $form_state->getValue('product_select')) {
+      $option = [
+        'NA' => $this->t('Choose the dosage'),
+      ];
+      if (!empty($selected_product) && $selected_product !== "NA") {
+        $product_dose = $this->orderData->getAllProductDosage();
+        $dose_list = $product_dose[$selected_product];
+        $session = $this->getRequest()->getSession();
+        $rows = $session->get('rows');
+        if (!empty($rows)) {
+          foreach ($rows as $id => $row) {
+            if ($row['product'] == $selected_product) {
+              unset($dose_list[$row['dose']]);
+            }
+          }
+        }
+      }
+      if (isset($dose_list)) {
+        ksort($dose_list);
+        $form['products']['dose']['#options'] = array_merge($option, $dose_list);
+      }
+    }
+    $form_state->setRebuild(TRUE);
+    return $form;
+  }
+
+  /**
+   * Load available product quentity.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form quantity.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadQuantity(array &$form, FormStateInterface $form_state) {
+    if ($selected_product = $form_state->getValue('product_select')) {
+      $selectedProduct = $form['product_select']['#options'][$selected_product];
+      $physician_details = $this->orderData->loadPhysicianDetails($selected_product);
+      $quanity = $physician_details['quanity'];
+      if ($physician_details['field_ordered'] == 'N' && $physician_details['field_allowed'] == 'Y') {
+        if ($quanity == 1) {
+          $value = $this->t("<strong>Quantity:</strong> You will receive 1 boxe(s) of medicine.");
+        }
+        else {
+          $value = $this->t('<strong>Quantity:</strong> You will receive @quantity boxes of medicine.', ['@quantity' => $quanity]);
+        }
+        $form['quantity']['#value'] = $value;
+        $form['quantity']['#attributes']['class'] = 'default-quantity-allowed';
+        // Store productes in session.
+        $session = $this->getRequest()->getSession();
+        $rows = $session->get('rows');
+
+        $product = $form_state->getValue('product_select');
+        $dose = $form_state->getValue('dose');
+        $nid = $form_state->getValue('nid');
+
+        if (($product != 'NA') && ($dose != 'NA')) {
+          $rows[] = [
+            'product' => $product,
+            'dose' => $dose,
+            'quanity' => $quanity,
+            'nid' => $physician_details['nid'],
+          ];
+        }
+        $session->set('rows', $rows);
+      }
+      else {
+        $quantity_error = $this->configFactory->get('quantity_error');
+        if (empty($quantity_error)) {
+          $value_text = $this->t('<strong>Quantity:</strong> You are not authorized to receive sms of this medicine.');
+          $value = Markup::create($value_text);
+        }
+        else {
+          $value = $quantity_error;
+        }
+        $form['quantity']['#value'] = $value;
+        $form['quantity']['#attributes']['class'] = 'default-quantity-rejected';
+      }
+    }
+    $form = $this->productSlection($form, $form_state);
+    $form_state->setRebuild(TRUE);
+    return $form;
+  }
+
+  /**
+   * Load physician Details.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadPhysicianDetails(array &$form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-address', $form['step_two']['address_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-name', $form['step_two']['name_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-name2', $form['step_two']['name_data2']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-zipcode', $form['step_two']['zipcode_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-crm', $form['step_two']['crm_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-mail', $form['step_two']['mail_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.step-two-phone', $form['step_two']['phone_data']));
+    $ajaxResponse->addCommand(new ReplaceCommand('.form-bottom-wrapper', $form['form_bottom']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'removeClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'addClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.progress-step', 'removeClass', ['is-active']));
+    $ajaxResponse->addCommand(new InvokeCommand('.s2', 'addClass', ['is-active']));
+
+    // Add timestamp to field when user accepts T&Cs.
+    $dateTime = $this->timeService->getRequestTime();
+    $ajaxResponse->addCommand(new InvokeCommand('.tc_datetime', 'val', [$dateTime]));
+
+    return $ajaxResponse;
+  }
+
+  /**
+   * Load all Details.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadAll(array &$form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $userdata = $form_state->getUserInput();
+    $flag = TRUE;
+    if (empty($userdata['first_name']) || !(preg_match('/^[\pL\s-]+$/u', $userdata['first_name']))) {
+      $ajaxResponse->addCommand(new HtmlCommand('#first-name-error-message', $this->t('Please enter a valid first name')));
+      $ajaxResponse->addCommand(new InvokeCommand('#first-name-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#first-name-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#first-name-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['last_name']) || !(preg_match('/^[\pL\s-]+$/u', $userdata['last_name']))) {
+      $ajaxResponse->addCommand(new HtmlCommand('#last-name-error-message', $this->t('Please enter a valid last name')));
+      $ajaxResponse->addCommand(new InvokeCommand('#last-name-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#last-name-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#last-name-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['zipcode']) || !(preg_match('/^\d{8}$/', preg_replace('/[^0-9]/is', '', $userdata['zipcode'])))) {
+      $ajaxResponse->addCommand(new HtmlCommand('#zipcode-error-message', $this->t('Please enter a valid zip code')));
+      $ajaxResponse->addCommand(new InvokeCommand('#zipcode-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#zipcode-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#zipcode-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['address_1'])) {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-address-one-error-message', $this->t('Please enter a valid Address')));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-address-one-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-address-one-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-address-one-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['address_2'])) {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-address-two-error-message', $this->t('Please enter a valid Address')));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-address-two-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-address-two-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-address-two-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['city'])) {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-city-error-message', $this->t('Please enter a valid City')));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-city-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-city-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-city-error-message', 'removeClass', ['error']));
+    }
+    if (empty($userdata['state'])) {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-state-error-message', $this->t('Please enter a valid State')));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-state-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#field-state-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#field-state-error-message', 'removeClass', ['error']));
+    }
+    if ($userdata['check_phone'] == 1 && (empty($userdata['phone_data_1']) || !(preg_match('/^\d{10}$/', preg_replace('/[^0-9]/is', '', $userdata['phone_data_1'])) || preg_match('/^\d{11}$/', preg_replace('/[^0-9]/is', '', $userdata['phone_data_1']))))) {
+      $ajaxResponse->addCommand(new HtmlCommand('#phone-error-message', $this->t('Please enter a valid Phone Number')));
+      $ajaxResponse->addCommand(new InvokeCommand('#phone-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#phone-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#phone-error-message', 'removeClass', ['error']));
+    }
+    if (!empty($userdata['phoneland_data_1']) && (!(preg_match('/^\d{10}$/', preg_replace('/[^0-9]/is', '', $userdata['phoneland_data_1'])) || preg_match('/^\d{10}$/', preg_replace('/[^0-9]/is', '', $userdata['phoneland_data_1']))))) {
+      $ajaxResponse->addCommand(new HtmlCommand('#phone-land-error-message', $this->t('Please enter a valid Telephone Number')));
+      $ajaxResponse->addCommand(new InvokeCommand('#phone-land-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#phone-land-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#phone-land-error-message', 'removeClass', ['error']));
+    }
+    if (!$this->validateCpf($userdata['cpf'])) {
+      $ajaxResponse->addCommand(new HtmlCommand('#cpf-error-message', $this->t('Please enter a valid CPF value')));
+      $ajaxResponse->addCommand(new InvokeCommand('#cpf-error-message', 'addClass', ['error']));
+      $flag = FALSE;
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#cpf-error-message', ''));
+      $ajaxResponse->addCommand(new InvokeCommand('#cpf-error-message', 'removeClass', ['error']));
+    }
+    if ($flag) {
+      $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'addClass', ['hide-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'removeClass', ['show-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'addClass', ['hide-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'removeClass', ['show-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'removeClass', ['hide-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'addClass', ['show-step']));
+      $ajaxResponse->addCommand(new InvokeCommand('.progress-step', 'removeClass', ['is-active']));
+      $ajaxResponse->addCommand(new InvokeCommand('.s3', 'addClass', ['is-active']));
+      $ajaxResponse->addCommand(new HtmlCommand('.name_data', $userdata['first_name'] . ' ' . $userdata['last_name']));
+      $ajaxResponse->addCommand(new HtmlCommand('.cpf-data', !empty($userdata['cpf']) ? $userdata['cpf'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.phone_data', !empty($userdata['phone_data_1']) ? $userdata['phone_data_1'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.step-three .city_data', !empty($userdata['city']) ? $userdata['city'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.step-three .state_data', !empty($userdata['state']) ? $userdata['state'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.step-three .zipcode_data', !empty($userdata['zipcode']) ? $userdata['zipcode'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.step-three .phoneland_data', !empty($userdata['phoneland_data_1']) ? $userdata['phoneland_data_1'] : '-'));
+      $ajaxResponse->addCommand(new HtmlCommand('.address_data', $userdata['address_1'] . ' ' . $userdata['address_2'] . ' ' . $userdata['complement'] . ' ' . $userdata['address_3']));
+    }
+    // Add timestamp to field when user gives personal consent.
+    $dateTime = $this->timeService->getRequestTime();
+    $ajaxResponse->addCommand(new InvokeCommand('.pc_datetime', 'val', [$dateTime]));
+    return $ajaxResponse;
+  }
+
+  /**
+   * Load step one Details.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadStepOne(array &$form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'removeClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.progress-step', 'removeClass', ['is-active']));
+    $ajaxResponse->addCommand(new InvokeCommand('.s1', 'addClass', ['is-active']));
+    return $ajaxResponse;
+  }
+
+  /**
+   * Load step two.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function loadStepTwo(array &$form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-one', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'addClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-three', 'removeClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'removeClass', ['hide-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.step-two', 'addClass', ['show-step']));
+    $ajaxResponse->addCommand(new InvokeCommand('.progress-step', 'removeClass', ['is-active']));
+    $ajaxResponse->addCommand(new InvokeCommand('.s2', 'addClass', ['is-active']));
+    return $ajaxResponse;
+  }
+
+  /**
+   * Validation rule passes.for CPF.
+   *
+   * @param string $cpf
+   *   User CPF.
+   *
+   * @return bool
+   *   True if valid CPF.
+   */
+  public function validateCpf($cpf): bool {
+    $cpf = preg_replace('/[^0-9]/is', '', $cpf);
+    if (strlen($cpf) != 11) {
+      return FALSE;
+    }
+    if (preg_match('/(\d)\1{10}/', $cpf)) {
+      return FALSE;
+    }
+    for ($t = 9; $t < 11; $t++) {
+      for ($d = 0, $c = 0; $c < $t; $c++) {
+        $d += $cpf[$c] * (($t + 1) - $c);
+      }
+      $d = ((10 * $d) % 11) % 10;
+      if ($cpf[$c] != $d) {
+        return FALSE;
+      }
+    }
+    return TRUE;
+  }
+
+  /**
+   * Call the function that consume the webservice.
+   *
+   * @param array $form
+   *   A form that be modified.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   The values of the form.
+   *
+   * @return array
+   *   The form modified
+   */
+  public function ajaxConsultZip(array $form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $userdata = $form_state->getUserInput();
+    $postal_code = str_replace('-', '', $userdata['zipcode']);
+    $response = $this->orderData->consultZip($postal_code);
+    $form['step_two']['address_wrapper']['address_1']['#attributes']['class'] = ['field_address_1'];
+    $form['step_two']['address_wrapper']['address_2']['#attributes']['class'] = ['field_address_2'];
+    $form['step_two']['address_wrapper']['address_3']['#attributes']['class'] = ['field_address_3'];
+    $form['step_two']['address_wrapper']['city_data']['#attributes']['class'] = [
+      'field-details',
+      'city_data',
+      'has-input',
+      'hide',
+    ];
+    $form['step_two']['address_wrapper']['state_data']['#attributes']['class'] = [
+      'field-details',
+      'state_data',
+      'has-input',
+      'hide',
+    ];
+    $form['step_two']['address_wrapper']['city']['#attributes']['class'] = ['field_city'];
+    $form['step_two']['address_wrapper']['state']['#attributes']['class'] = ['field_state'];
+    $readonly_false = ['readonly', FALSE];
+    $readonly_true = ['readonly', TRUE];
+    $disabled_false = ['disabled', FALSE];
+    $disabled_true = ['disabled', TRUE];
+    $ajaxResponse->addCommand(new InvokeCommand('.field_address_1', 'prop', $readonly_false));
+    $ajaxResponse->addCommand(new InvokeCommand('.field_address_3', 'prop', $readonly_false));
+    $ajaxResponse->addCommand(new InvokeCommand('.field_city', 'prop', $readonly_false));
+    $ajaxResponse->addCommand(new InvokeCommand('.field_state', 'prop', $readonly_false));
+    $ajaxResponse->addCommand(new HtmlCommand('#zipcode-error-message', ''));
+    $ajaxResponse->addCommand(new InvokeCommand('#zipcode-error-message', 'removeClass', ['error']));
+    if (!isset($response->erro)) {
+      $address = $response->localidade . ", " . $response->uf;
+      $address_1 = $response->logradouro;
+      $address_3 = $response->bairro;
+      $one = [1];
+      $ajaxResponse->addCommand(new InvokeCommand('.field_city', 'val', [$response->localidade]));
+      $ajaxResponse->addCommand(new InvokeCommand('.field_city', 'prop', $readonly_true));
+      $ajaxResponse->addCommand(new InvokeCommand('.field_state', 'val', [$response->uf]));
+      $ajaxResponse->addCommand(new InvokeCommand('.field_state', 'prop', $readonly_true));
+      $ajaxResponse->addCommand(new InvokeCommand('.valid-zipcode', 'val', $one));
+
+      if ($form['step_two']['terms_setup2']['#value'] == 1) {
+        $ajaxResponse->addCommand(new InvokeCommand('.step_two_next', 'prop', $disabled_false));
+      }
+      if (!empty($address_1)) {
+        $ajaxResponse->addCommand(new InvokeCommand('.field_address_1', 'val', [$address_1]));
+        $ajaxResponse->addCommand(new InvokeCommand('.field_address_1', 'prop', $readonly_true));
+      }
+      if (!empty($address_3)) {
+        $ajaxResponse->addCommand(new InvokeCommand('.field_address_3', 'val', [$address_3]));
+        $ajaxResponse->addCommand(new InvokeCommand('.field_address_3', 'prop', $readonly_true));
+      }
+    }
+    else {
+      $ajaxResponse->addCommand(new HtmlCommand('#zipcode-error-message', $this->t('Please enter a valid zip code')));
+      $ajaxResponse->addCommand(new InvokeCommand('#zipcode-error-message', 'addClass', ['error']));
+      $ajaxResponse->addCommand(new InvokeCommand('.valid-zipcode', 'val', [0]));
+      $ajaxResponse->addCommand(new InvokeCommand('.step_two_next', 'prop', $disabled_true));
+    }
+    return $ajaxResponse;
+  }
+
+  /**
+   * Update requet sms request.
+   *
+   * @param array $form
+   *   The form.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Stores information about the state of a form.
+   *
+   * @return array
+   *   The form element.
+   */
+  public function requestsm(array &$form, FormStateInterface $form_state) {
+    $ajaxResponse = new AjaxResponse();
+    $session = $this->getRequest()->getSession();
+    $rows = $session->get('rows');
+    $updated_values = $form_state->getUserInput();
+    if (!empty($rows)) {
+      $this->orderData->updateOrderStatus($rows, $updated_values);
+    }
+    $session = $this->getRequest()->getSession();
+    $rows = $session->set('rows', []);
+    $ajaxResponse->addCommand(new RedirectCommand('/thank-you'));
+    return $ajaxResponse;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function submitForm(array &$form, FormStateInterface $form_state) {
+    // @todo Add form submit.
+  }
+
+}

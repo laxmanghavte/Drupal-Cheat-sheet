@@ -1,1 +1,9 @@
 https://www.drupal.org/docs/contributed-modules/twig-tweak-2x/cheat-sheet
+
+Dump all variables in twig
+<ol>
+    {% for key, value in _context  %}
+      <li>{{ key }}</li>
+    {% endfor %}
+</ol>
+
